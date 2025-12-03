@@ -262,7 +262,6 @@ def train_model(model, train_loader, val_loader, epochs=500, lr=0.01):
     
     train_losses = []
     val_losses = []
-    mae_histories = {'height': [], 'flange': []}
     
     patience = 20
     min_delta = 1e-3
@@ -273,6 +272,7 @@ def train_model(model, train_loader, val_loader, epochs=500, lr=0.01):
     print("Training...")
     
     for epoch in range(epochs):
+        # Training phase
         model.train()
         train_loss = 0
         train_batches = 0
@@ -285,50 +285,37 @@ def train_model(model, train_loader, val_loader, epochs=500, lr=0.01):
             loss = F.mse_loss(pred, batch.y)
             
             loss.backward()
-            
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
             
             train_loss += loss.item()
             train_batches += 1
         
+        # Validation phase
         model.eval()
         val_loss = 0
-        val_mae_height = 0
-        val_mae_flange = 0
         val_batches = 0
         
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
                 pred = model(batch)
-                
                 loss = F.mse_loss(pred, batch.y)
-                mae_height = F.l1_loss(pred[:, 0], batch.y[:, 0]).item()
-                mae_flange = F.l1_loss(pred[:, 1], batch.y[:, 1]).item()
-                
                 val_loss += loss.item()
-                val_mae_height += mae_height
-                val_mae_flange += mae_flange
                 val_batches += 1
         
         train_loss_avg = train_loss / train_batches
         val_loss_avg = val_loss / val_batches
-        val_mae_height_avg = val_mae_height / val_batches
-        val_mae_flange_avg = val_mae_flange / val_batches
         
         train_losses.append(train_loss_avg)
         val_losses.append(val_loss_avg)
-        mae_histories['height'].append(val_mae_height_avg)
-        mae_histories['flange'].append(val_mae_flange_avg)
         
         scheduler.step(val_loss_avg)
         
+        # Early stopping logic
         if epoch >= 10:
             recent_val_losses = val_losses[-10:]
             avg_recent_loss = np.mean(recent_val_losses)
-            
             improvement = (avg_recent_loss - val_loss_avg) / avg_recent_loss
             
             if improvement < min_delta:
@@ -340,80 +327,87 @@ def train_model(model, train_loader, val_loader, epochs=500, lr=0.01):
                 patience_counter = 0
                 best_val_loss = min(best_val_loss, val_loss_avg)
         
+        # Progress reporting
         if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1 or early_stop:
             print(f'Epoch {epoch+1:03d}/{epochs} | '
-                  f'Loss: {train_loss_avg:.1f}/{val_loss_avg:.1f} | '
-                  f'MAE H: {val_mae_height_avg:.1f} F: {val_mae_flange_avg:.1f} | '
+                  f'Train MSE: {train_loss_avg:.1f} | '
+                  f'Val MSE: {val_loss_avg:.1f} | '
                   f'LR: {optimizer.param_groups[0]["lr"]:.6f}')
         
         if early_stop:
             break
     
-    return train_losses, val_losses, mae_histories
+    return train_losses, val_losses
 
-def plot_losses(train_losses, val_losses, mae_histories, save_path):
+def plot_losses(train_losses, val_losses, save_path):
     epochs_range = range(1, len(train_losses) + 1)
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    axes[0, 0].plot(epochs_range, train_losses, 'b-', label='Train Loss', linewidth=2)
-    axes[0, 0].plot(epochs_range, val_losses, 'r-', label='Val Loss', linewidth=2)
+    # Main loss plot
+    axes[0, 0].plot(epochs_range, train_losses, 'b-', label='Train MSE Loss', linewidth=2)
+    axes[0, 0].plot(epochs_range, val_losses, 'r-', label='Val MSE Loss', linewidth=2)
     axes[0, 0].set_xlabel('Epoch')
     axes[0, 0].set_ylabel('MSE Loss')
-    axes[0, 0].set_title('Training and Validation Loss')
+    axes[0, 0].set_title('Training and Validation MSE Loss')
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     
-    axes[0, 1].plot(epochs_range, mae_histories['height'], 'g-', label='Height MAE', linewidth=2)
-    axes[0, 1].plot(epochs_range, mae_histories['flange'], 'orange', label='Flange MAE', linewidth=2)
+    # Log scale plot
+    axes[0, 1].plot(epochs_range, train_losses, 'b-', label='Train MSE', linewidth=2)
+    axes[0, 1].plot(epochs_range, val_losses, 'r-', label='Val MSE', linewidth=2)
+    axes[0, 1].set_yscale('log')
     axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('MAE (cm)')
-    axes[0, 1].set_title('Height and Flange MAE')
+    axes[0, 1].set_ylabel('MSE Loss (log scale)')
+    axes[0, 1].set_title('MSE Loss (Log Scale)')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     
+    # Metrics summary
     final_train_loss = train_losses[-1] if train_losses else 0
     final_val_loss = val_losses[-1] if val_losses else 0
-    final_height_mae = mae_histories['height'][-1] if mae_histories['height'] else 0
-    final_flange_mae = mae_histories['flange'][-1] if mae_histories['flange'] else 0
+    best_val_loss = min(val_losses) if val_losses else 0
     
-    metrics_text = f"Final Metrics:\n"
-    metrics_text += f"Train Loss: {final_train_loss:.2f}\n"
-    metrics_text += f"Val Loss: {final_val_loss:.2f}\n"
-    metrics_text += f"Height MAE: {final_height_mae:.1f} cm\n"
-    metrics_text += f"Flange MAE: {final_flange_mae:.1f} cm\n"
-    metrics_text += f"Total Epochs: {len(train_losses)}"
+    metrics_text = f"Training Summary:\n"
+    metrics_text += f"Final Train MSE: {final_train_loss:.2f}\n"
+    metrics_text += f"Final Val MSE: {final_val_loss:.2f}\n"
+    metrics_text += f"Best Val MSE: {best_val_loss:.2f}\n"
+    metrics_text += f"Total Epochs: {len(train_losses)}\n"
+    metrics_text += f"Improvement: {train_losses[0]-final_train_loss:.1f} (Train)\n"
+    metrics_text += f"Improvement: {val_losses[0]-final_val_loss:.1f} (Val)"
     
     axes[1, 0].text(0.1, 0.5, metrics_text, fontsize=12, 
                    verticalalignment='center', horizontalalignment='left',
                    transform=axes[1, 0].transAxes,
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     axes[1, 0].axis('off')
-    axes[1, 0].set_title('Final Metrics')
+    axes[1, 0].set_title('Training Summary')
     
+    # Recent trends
     if len(train_losses) > 20:
         last_50 = min(50, len(train_losses))
-        axes[1, 1].plot(range(last_50), train_losses[-last_50:], 'b-', label='Last 50 Train', linewidth=2)
-        axes[1, 1].plot(range(last_50), val_losses[-last_50:], 'r-', label='Last 50 Val', linewidth=2)
+        axes[1, 1].plot(range(last_50), train_losses[-last_50:], 'b-', label='Train (last 50)', linewidth=2)
+        axes[1, 1].plot(range(last_50), val_losses[-last_50:], 'r-', label='Val (last 50)', linewidth=2)
+        axes[1, 1].set_xlabel('Epoch (Recent)')
     else:
         axes[1, 1].plot(epochs_range, train_losses, 'b-', label='Train', linewidth=2)
         axes[1, 1].plot(epochs_range, val_losses, 'r-', label='Val', linewidth=2)
+        axes[1, 1].set_xlabel('Epoch')
     
-    axes[1, 1].set_xlabel('Epoch (Recent)')
-    axes[1, 1].set_ylabel('Loss')
+    axes[1, 1].set_ylabel('MSE Loss')
     axes[1, 1].set_title('Recent Loss Trends')
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    plot_filename = os.path.join(save_path, 'training_loss_plot.png')
+    plot_filename = os.path.join(save_path, 'training_mse_loss_plot.png')
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-    print(f"Loss plot saved to: {plot_filename}")
+    print(f"MSE loss plot saved to: {plot_filename}")
     plt.show()
 
 def main():
-    print("GNN Training")
+    print("GNN Training for Edge Feature Prediction")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -440,7 +434,7 @@ def main():
     train_dataset = [dataset[i] for i in train_indices]
     val_dataset = [dataset[i] for i in val_indices]
     
-    print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    print(f"Train graphs: {len(train_dataset)}, Val graphs: {len(val_dataset)}")
     
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -449,20 +443,20 @@ def main():
     model = EnhancedEdgeGNN(node_dim=3, edge_dim=2, hidden_dim=HIDDEN_DIM)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Params: {total_params:,}")
+    print(f"Total parameters: {total_params:,}")
     
-    print("\n4. Training...")
-    train_losses, val_losses, mae_histories = train_model(
+    print("\n4. Training model...")
+    train_losses, val_losses = train_model(
         model, train_loader, val_loader, 
         epochs=EPOCHS, lr=LEARNING_RATE
     )
     
+    # Save model
     model_save_path = os.path.join(script_dir, 'gnn_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
         'train_losses': train_losses,
         'val_losses': val_losses,
-        'mae_histories': mae_histories,
         'config': {
             'batch_size': BATCH_SIZE,
             'epochs': EPOCHS,
@@ -475,7 +469,8 @@ def main():
     print(f"\nModel saved to: {model_save_path}")
     print(f"Total epochs trained: {len(train_losses)}")
     
-    plot_losses(train_losses, val_losses, mae_histories, script_dir)
+    # Plot losses
+    plot_losses(train_losses, val_losses, script_dir)
     
     print("\n5. Validation results:")
     model.eval()
@@ -488,23 +483,21 @@ def main():
             predictions = model(graph)
         
         mse = F.mse_loss(predictions, graph.y).item()
-        mae_height = F.l1_loss(predictions[:, 0], graph.y[:, 0]).item()
-        mae_flange = F.l1_loss(predictions[:, 1], graph.y[:, 1]).item()
         
         print(f"Nodes: {graph.num_nodes}, Edges: {graph.edge_index.shape[1]}")
-        print(f"MSE: {mse:.1f}, Height MAE: {mae_height:.1f}, Flange MAE: {mae_flange:.1f}")
+        print(f"MSE Loss: {mse:.1f}")
         
-        print("Predictions (first 3):")
+        print("Predictions vs Ground Truth (first 3 edges):")
         for edge_idx in range(3):
             true_h = graph.y[edge_idx, 0].item()
             true_f = graph.y[edge_idx, 1].item()
             pred_h = predictions[edge_idx, 0].item()
             pred_f = predictions[edge_idx, 1].item()
-            print(f"Edge {edge_idx}: T({true_h:.0f},{true_f:.0f}) P({pred_h:.0f},{pred_f:.0f})")
+            print(f"Edge {edge_idx}: True({true_h:.0f},{true_f:.0f}) Pred({pred_h:.0f},{pred_f:.0f})")
 
 if __name__ == "__main__":
     try:
         import torch_geometric
         main()
     except ImportError:
-        print("Install: pip install torch torch-geometric pandas numpy scikit-learn")
+        print("Please install required packages: pip install torch torch-geometric pandas numpy scikit-learn matplotlib")
